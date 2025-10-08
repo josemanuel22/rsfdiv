@@ -52,6 +52,28 @@ def js_normal_1d(mu0: float, sigma0: float, mu1: float, sigma1: float, n_nodes: 
 
     return 0.5*(Ep + Eq)
 
+def log_phi(x):
+    return -0.5*np.log(2*np.pi) - 0.5*x**2
+
+def log_mix_pm1(x, Delta):
+    a = log_phi(x - Delta)
+    b = log_phi(x + Delta)
+    m = np.maximum(a, b)
+    return np.log(0.5*np.exp(a-m) + 0.5*np.exp(b-m)) + m
+
+def js_true_mixture_vs_gaussian(Delta, n_mc=200000, rng_seed=2):
+    rng_local = np.random.default_rng(rng_seed)
+    x_half = n_mc//2
+    xP = np.concatenate([rng_local.normal(-Delta, 1.0, size=x_half),
+                         rng_local.normal( Delta, 1.0, size=n_mc - x_half)])
+    xQ = rng_local.normal(0.0, 1.0, size=n_mc)
+    lpP = log_mix_pm1(xP, Delta); lqP = log_phi(xP)
+    lpQ = log_mix_pm1(xQ, Delta); lqQ = log_phi(xQ)
+    mP = np.maximum(lpP, lqP); lmP = np.log(0.5*np.exp(lpP-mP) + 0.5*np.exp(lqP-mP)) + mP
+    mQ = np.maximum(lpQ, lqQ); lmQ = np.log(0.5*np.exp(lpQ-mQ) + 0.5*np.exp(lqQ-mQ)) + mQ
+    return 0.5*(np.mean(lpP - lmP) + np.mean(lqQ - lmQ))
+
+
 # ---------------------------
 # Entropy functions f(t)
 # ---------------------------
@@ -492,9 +514,13 @@ def rs_f_divergence_sliced(
 # ---------------------------
 if __name__ == "__main__":
     rng = np.random.default_rng(123)
+    
+    K = 100
+    nP = 10000
+    nQ = 10000
 
     # 1) 1D: N(0,1) vs N(1,1)
-    K = 100
+    
     mu = rng.normal(loc=0.0, scale=1.0, size=10000)
     nu = rng.normal(loc=1.0, scale=1.0, size=10000)
     res = rs_f_divergence_1d(mu, nu, K=K, f="kl")
@@ -538,10 +564,98 @@ if __name__ == "__main__":
 
     print(f"1D JS (K={K}):   {res.D:.6f}")
     print(f"True JS:          {JS_true:.6f}  (log 2 ≈ {np.log(2):.6f})")
+    
+    # Small sweep in Δ for JS (visual) + variance
+    deltas = np.linspace(0.0, 2.0, 9)
+    R = 10  # repeats per Δ
+
+    vals_hat_mean, vals_hat_var, vals_hat_std = [], [], []
+    vals_true_mean, vals_true_var, vals_true_std = [], [], []
+
+    for d in deltas:
+        hat_r, true_r = [], []
+        for _ in range(R):
+            xP = np.concatenate([rng.normal(-d, 1.0, size=nP//2),
+                                rng.normal( d, 1.0, size=nP - nP//2)])
+            xQ = rng.normal(0.0, 1.0, size=nQ)
+            hat_r.append(float(rs_f_divergence_1d(xP, xQ, K=K, f="js").D))
+            true_r.append(float(js_true_mixture_vs_gaussian(d, n_mc=nP)))  # increase n_mc for lower MC variance
+
+        hat_r = np.array(hat_r, dtype=float)
+        true_r = np.array(true_r, dtype=float)
+
+        vals_hat_mean.append(hat_r.mean())
+        vals_hat_var.append(hat_r.var(ddof=1))
+        vals_hat_std.append(hat_r.std(ddof=1))
+
+        vals_true_mean.append(true_r.mean())
+        vals_true_var.append(true_r.var(ddof=1))
+        vals_true_std.append(true_r.std(ddof=1))
+
+    # (optional) turn into arrays if you’ll plot with error bars
+    vals_hat_mean = np.array(vals_hat_mean); vals_hat_std = np.array(vals_hat_std)
+    vals_true_mean = np.array(vals_true_mean); vals_true_std = np.array(vals_true_std)
+
+    print(f"Mean std ranks-div: {np.mean(vals_hat_std):.12f}, max std ranks-div:{np.max(vals_hat_std):.12f}")
+    print(f"Mean std mc: {np.mean(vals_true_std):.12f},  max std mc:{np.max(vals_true_std):.12f}")
+
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.plot(deltas, vals_true_mean, marker='x', linestyle=':', label="True JS (MC)")
+    plt.plot(deltas, vals_hat_mean, marker='o', linestyle='-', label=f"Rank (K={K}) JS")
+    plt.fill_between(deltas, vals_hat_mean - vals_hat_std, vals_hat_mean + vals_hat_std, alpha=0.2)
+    plt.xlabel("Δ (mixture separation)")
+    plt.ylabel("Jensen–Shannon divergence (nats)")
+    plt.title("Mixture (0.5 N(-Δ,1) + 0.5 N(Δ,1))  vs  Q=N(0,1)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+    
+    # 2) Sliced 2D: mean shift along x-axis (KL)
+    L = 128
+    X = rng.normal(size=(nP, 2))
+    Z = rng.normal(loc=(0.5, 0.0), scale=1.0, size=(nQ, 2))
+
+    sres = rs_f_divergence_sliced(X, Z, K=K, f="kl", L=L, random_state=1)
+    print(f"Sliced KL (K={K}, L={L}): {sres.D:.6f}")
+
+    # True KL for equal covariances (I2): 0.5 * ||Δ||^2, here Δ = (0.5, 0)
+    KL_true = 0.5 * (0.5**2)
+    print(f"True KL (closed form):    {KL_true:.6f}")
+
+    # Check the factor in d=2
+    print(f"d * Sliced KL:             {2*sres.D:.6f}  (should match true)")
 
     # 2) Sliced 2D: mean shift along x-axis
-    X = rng.normal(size=(4000, 2))
-    Z = rng.normal(loc=(0.5, 0.0), scale=1.0, size=(4000, 2))
+    L = 128
+    X = rng.normal(size=(nP, 2))
+    Z = rng.normal(loc=(0.5, 0.0), scale=1.0, size=(nQ, 2))
     sres = rs_f_divergence_sliced(
-        X, Z, K=20, f="hellinger2", L=64, random_state=1)
-    print(f"Sliced Hellinger^2 (K=20, L=64): {sres.D:.6f}")
+        X, Z, K=K, f="hellinger2", L=L, random_state=1)
+    print(f"Sliced Hellinger^2 (K={K}, L={L}): {sres.D:.6f}")
+
+    def hellinger2_gaussians(mu1, Sigma1, mu2, Sigma2):
+        mu1 = np.asarray(mu1); mu2 = np.asarray(mu2)
+        Sigma1 = np.asarray(Sigma1); Sigma2 = np.asarray(Sigma2)
+        dmu = mu1 - mu2
+        Sigma_avg = 0.5 * (Sigma1 + Sigma2)
+
+        # log-determinants for numerical stability
+        s1, logdet1 = np.linalg.slogdet(Sigma1)
+        s2, logdet2 = np.linalg.slogdet(Sigma2)
+        sa, logdetA = np.linalg.slogdet(Sigma_avg)
+        if s1 <= 0 or s2 <= 0 or sa <= 0:
+            raise ValueError("Covariances must be SPD.")
+
+        # log Bhattacharyya coefficient
+        quad = dmu @ np.linalg.solve(Sigma_avg, dmu)
+        log_BC = 0.25 * (logdet1 + logdet2) - 0.5 * logdetA - 0.125 * quad
+        BC = np.exp(log_BC)
+        return 2.0 * (1.0 - BC)
+
+    # For your case: N([0,0], I2) vs N([0.5,0], I2)
+    H2_true = hellinger2_gaussians(mu1=[0.0, 0.0], Sigma1=np.eye(2),
+                                mu2=[0.5, 0.0], Sigma2=np.eye(2))
+    print(f"True Hellinger^2 (closed form): {H2_true:.6f}")
+    print(f"Gap (true - sliced):            {H2_true - sres.D:.6f}")

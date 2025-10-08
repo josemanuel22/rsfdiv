@@ -1,204 +1,201 @@
-# ==== Differentiable RS f-divergence in PyTorch (1D + sliced) =================
-import math
+# train_mnist_sliced_rank_fdiv.py
+# Minimal MNIST generator trained with sliced rank f-divergence (JS by default).
+
+import math, argparse, os
 import torch
-import numpy as np
-from torch import nn
-import matplotlib.pyplot as plt
-from torch.distributions import Categorical, Normal, MixtureSameFamily
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, utils as vutils
 
-
-@torch.no_grad()
-def _unit_sphere(L, d, device):
-    v = torch.randn(L, d, device=device)
-    return v / (v.norm(dim=1, keepdim=True) + 1e-12)
-
-
-def _normal_cdf(x):
-    # Φ(x) = 0.5 * (1 + erf(x/√2))
-    return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
-
-
-def _soft_ecdf(y, y_ref, sigma):
-    """
-    Differentiable ECDF: F̂_σ(y) = (1/N) Σ_j Φ((y - y_ref_j)/σ)
-    y, y_ref: (B,) tensors; sigma>0 (float or tensor)
-    """
-    diff = (y[:, None] - y_ref[None, :]) / sigma
-    return _normal_cdf(diff).mean(dim=1)
-
-
-def _f_apply(name, x, eps=1e-12):
-    x = torch.clamp(x, min=eps)
-    if name == "kl":
-        return x * torch.log(x) - (x - 1.0)
-    if name == "reverse_kl":
-        return -torch.log(x) + x - 1.0
-    if name == "hellinger2":
-        return (torch.sqrt(x) - 1.0) ** 2
-    if name == "tv":
-        return (x - 1.0).abs()
-    if name == "pearson_chi2":
-        return (x - 1.0) ** 2
-    if name == "neyman_chi2":
-        return (1.0 - x) ** 2 / x
-    if name == "js":
-        return x * (torch.log(2*x) - torch.log1p(x)) + (math.log(2.0) - torch.log1p(x))
-    raise ValueError(f"Unknown f: {name}")
-
-
-def rsf_loss_1d_torch(y_gen, y_ref, K=64, f="kl", sigma=None):
-    """
-    y_gen, y_ref: (B,) float tensors (requires_grad on y_gen for training).
-    sigma: smoothing for ECDF; default = 0.2 * std(y_ref) (no grad).
-    """
-    device, dtype = y_gen.device, y_gen.dtype
-    if sigma is None:
-        with torch.no_grad():
-            s = y_ref.std(unbiased=False) + 1e-6
-        sigma = 0.2 * s
-    t = _soft_ecdf(y_gen, y_ref, sigma)                   # (B,)
-    t = torch.clamp(t, 1e-7, 1.0 - 1e-7)
-
-    # Vectorized Binomial pmfs over n=0..K for all samples
-    n = torch.arange(K+1, device=device, dtype=dtype)[:, None]  # (K+1,1)
-    logC = (torch.lgamma(torch.tensor(K+1., device=device, dtype=dtype))
-            - torch.lgamma(n+1.) - torch.lgamma(torch.tensor(K-n+1., device=device, dtype=dtype)))
-    logpmf = logC + n*torch.log(t)[None, :] + \
-        (K-n)*torch.log1p(-t)[None, :]   # (K+1,B)
-    Q = logpmf.exp().mean(dim=1)                                            # (K+1,)
-
-    # scalar
-    return _f_apply(f, (K+1.0) * Q).mean()
-
-
-def rsf_loss_sliced_torch(X_gen, X_ref, K=64, f="kl", L=64, sigma=None):
-    """
-    X_gen, X_ref: (B,d). Draw L random directions and average 1D RS losses.
-    """
-    device, dtype = X_gen.device, X_gen.dtype
-    d = X_gen.shape[1]
-    S = _unit_sphere(L, d, device)                        # (L,d)
-    losses = []
-    for s in S:                                           # small L -> loop is fine; vectorize if needed
-        y_g = (X_gen @ s)                                 # (B,)
-        y_r = (X_ref @ s)
-        losses.append(rsf_loss_1d_torch(y_g, y_r, K=K, f=f, sigma=sigma))
-    return torch.stack(losses).mean()
-
-# ==== Minimal training example =================================================
-# Learn a 1D generator G(z) to match target N(1,1) by minimizing RS KL
-
-
-class Gen1D(nn.Module):
-    def __init__(self, zdim=4, hidden=64):
+# -----------------------------
+# Generator: DCGAN-ish for 28x28
+# -----------------------------
+class Gen28(nn.Module):
+    def __init__(self, z_dim=128):
         super().__init__()
+        self.z_dim = z_dim
         self.net = nn.Sequential(
-            nn.Linear(zdim, hidden), nn.SiLU(),
-            nn.Linear(hidden, hidden), nn.SiLU(),
-            nn.Linear(hidden, 1)
+            nn.Linear(z_dim, 256*7*7),
+            nn.BatchNorm1d(256*7*7),
+            nn.ReLU(True),
+        )
+        self.up = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),  # 7 -> 14
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),   # 14 -> 28
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.Conv2d(64, 1, 3, 1, 1),
+            nn.Tanh(),  # outputs in [-1,1]
         )
 
-    def forward(self, z): return self.net(z).squeeze(-1)
+    def forward(self, z):
+        x = self.net(z)
+        x = x.view(z.size(0), 256, 7, 7)
+        x = self.up(x)
+        return x
 
+# -----------------------------
+# f-generators (natural logs)
+# -----------------------------
+def f_js(t):
+    u = torch.clamp(t, 1e-30, None)
+    return 0.5 * (u * (torch.log(2*u) - torch.log1p(u)) + (math.log(2.) - torch.log1p(u)))
 
-B, zdim = 10000, 4
-G = Gen1D(zdim).cuda() if torch.cuda.is_available() else Gen1D(zdim)
-opt = torch.optim.Adam(G.parameters(), lr=1e-2)
+def f_kl(t):
+    u = torch.clamp(t, 1e-30, None)
+    return u * torch.log(u)
 
-device = next(G.parameters()).device  # or torch.device("cpu"/"cuda")
+def f_hellinger2(t):
+    # (sqrt(t)-1)^2
+    u = torch.clamp(t, 0.0, None)
+    return (torch.sqrt(u) - 1.0)**2
 
-target_dist = torch.distributions.Normal(
-    loc=torch.tensor(10.0), scale=torch.tensor(2.0))
+def pick_f(name):
+    name = name.lower()
+    if name in ("js","jensen-shannon"): return f_js
+    if name in ("kl",): return f_kl
+    if name in ("hellinger2","hell2"): return f_hellinger2
+    raise ValueError("f must be one of: js, kl, hellinger2")
 
-weights = torch.tensor([0.7, 0.3], device=device)
-means = torch.tensor([0.0, 5.0], device=device)
-scales = torch.tensor([1.0, 0.8], device=device)
+# -----------------------------
+# Soft CDF & Bernstein rank pmf
+# -----------------------------
+def soft_ecdf_Q_of_x(x_proj, y_proj, tau):
+    """
+    x_proj: (B,) fake projections
+    y_proj: (M,) real projections (reference)
+    tau: temperature > 0 (scale ~ std(y_proj)*c)
+    Returns U in [0,1]^B approximating F_Q(x).
+    """
+    # pairwise (x - y)/tau -> sigmoid
+    diff = (x_proj[:, None] - y_proj[None, :]) / tau
+    U = torch.sigmoid(diff).mean(dim=1)
+    # clamp away from 0/1 for numerical stability
+    return U.clamp(1e-6, 1-1e-6)
 
-mix = Categorical(probs=weights)          # ()
-comp = Normal(loc=means, scale=scales)     # batch_shape=(2,), event_shape=()
-target_dist = MixtureSameFamily(mix, comp)  # mixture in R
+def bernstein_basis(U, K):
+    """
+    U: (B,) in (0,1)
+    Returns Bmat: shape (B, K+1) with B_{K,n}(U) = C(K,n) U^n (1-U)^{K-n}
+    """
+    B = U.shape[0]
+    n = torch.arange(K+1, device=U.device, dtype=U.dtype)  # (K+1,)
+    # log comb using lgamma
+    logC = torch.lgamma(torch.tensor(K+1., device=U.device, dtype=U.dtype)) \
+         - torch.lgamma(n+1.) - torch.lgamma(torch.tensor(K, device=U.device, dtype=U.dtype)-n+1.)
+    # (B,1) and (1,K+1)
+    Ue = U[:, None]
+    logB = logC + n[None, :]*torch.log(Ue) + (K - n)[None, :]*torch.log(1 - Ue)
+    return torch.exp(logB)  # (B, K+1)
 
-# training loop usage:
-# x_real = target_dist.sample((B,))          # shape (B,)
+def discrete_f_div_from_pmf(p_hat, f_fn):
+    """
+    p_hat: (K+1,) probabilities summing to 1
+    q_hat: uniform on {0,...,K}
+    """
+    K = p_hat.numel() - 1
+    q = 1.0 / (K+1)
+    ratio = torch.clamp(p_hat / q, 1e-30, None)
+    return (q * f_fn(ratio)).sum()
 
-for step in range(200):
-    # real batch from target ν
-    x_real = target_dist.sample((B,)).to(device)
+def sliced_rank_fdiv(X, Y, L=64, K=64, f_name="js", tau_scale=0.3, rng=None):
+    """
+    X: fake images in [-1,1], shape (B,1,28,28)
+    Y: real images in [-1,1], shape (M,1,28,28)
+    L: number of random directions
+    K: Bernstein degree (rank resolution)
+    f_name: 'js', 'kl', or 'hellinger2'
+    tau_scale: temperature = tau_scale * std(y_proj) + 1e-4
+    """
+    f_fn = pick_f(f_name)
+    device = X.device
+    B = X.size(0); M = Y.size(0)
+    XF = X.view(B, -1)  # (B, 784)
+    YF = Y.view(M, -1)  # (M, 784)
 
-    # fake batch μθ via reparam z->Gθ(z)
-    z = torch.randn(B, zdim, device=device)
-    x_fake = G(z)
+    if rng is None:
+        rng = torch.Generator(device=device)
+        rng.manual_seed(1234)
 
-    # anneal smoothing: start smooth, decrease over time (helps stability)
-    sigma = max(0.05, 0.5 * math.exp(-step / 1000.0)) * \
-        (x_real.std(unbiased=False).item() + 1e-6)
+    D_total = 0.0
+    for _ in range(L):
+        # random direction on sphere
+        s = torch.randn(XF.size(1), device=device, generator=rng)
+        s = s / (s.norm() + 1e-12)
+        x_proj = XF @ s  # (B,)
+        y_proj = YF @ s  # (M,)
 
-    loss = rsf_loss_1d_torch(x_fake, x_real, K=10000, f="kl", sigma=sigma)
-    opt.zero_grad(set_to_none=True)
-    loss.backward()
-    opt.step()
+        tau = tau_scale * (y_proj.std() + 1e-6) + 1e-4
+        U = soft_ecdf_Q_of_x(x_proj, y_proj, tau)  # (B,)
+        Bmat = bernstein_basis(U, K)               # (B, K+1)
+        p_hat = Bmat.mean(dim=0)                   # (K+1,)
+        D_total = D_total + discrete_f_div_from_pmf(p_hat, f_fn)
 
-    if step % 100 == 0:
-        with torch.no_grad():
-            m, s = x_fake.mean().item(), x_fake.std(unbiased=False).item()
-        print(
-            f"step {step:4d} | loss {loss.item():.4f} | gen mean {m:.3f} std {s:.3f}")
+    return D_total / L
 
-with torch.no_grad():
-    n_eval = 20_000
-    z = torch.randn(n_eval, zdim, device=device)
-    x_fake_eval_t = G(z).detach().cpu()                        # (n_eval,)
-    x_real_eval_t = target_dist.sample((n_eval,)).to(device).cpu()
+# -----------------------------
+# Training loop
+# -----------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out_dir", type=str, default="./runs/mnist_srfdiv")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--z_dim", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--K", type=int, default=64)
+    parser.add_argument("--L", type=int, default=64)
+    parser.add_argument("--f", type=str, default="js", choices=["js","kl","hellinger2"])
+    parser.add_argument("--tau_scale", type=float, default=0.3)
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
 
-    # convert tensors -> Python lists (no NumPy needed)
-    x_fake_eval = x_fake_eval_t.tolist()
-    x_real_eval = x_real_eval_t.tolist()
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # common plotting range
-    lo = float(min(min(x_fake_eval), min(x_real_eval)))
-    hi = float(max(max(x_fake_eval), max(x_real_eval)))
+    # Data: map to [-1,1]
+    tfm = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5]),
+    ])
+    ds = datasets.MNIST(root="./data", train=True, download=True, transform=tfm)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=2, drop_last=True)
 
-    # true N(1,1) pdf with torch, then to lists
-    xs_t = torch.linspace(lo, hi, 400)
-    pdf_true_t = (1.0 / math.sqrt(2.0 * math.pi)) * \
-        torch.exp(-0.5 * (xs_t - 1.0) ** 2)
-    xs = xs_t.tolist()
-    pdf_true = pdf_true_t.tolist()
+    # Model & opt
+    G = Gen28(z_dim=args.z_dim).to(device)
+    opt = torch.optim.Adam(G.parameters(), lr=args.lr, betas=(0.5, 0.999))
 
-    plt.figure(figsize=(10, 4))
+    fixed_z = torch.randn(64, args.z_dim, device=device)
 
-    # --- PDF / histogram overlay
-    plt.subplot(1, 2, 1)
-    plt.hist(x_real_eval, bins=80, range=(lo, hi),
-             density=True, alpha=0.6, label="target")
-    plt.hist(x_fake_eval, bins=80, range=(lo, hi),
-             density=True, alpha=0.6, label="generator")
-    plt.plot(xs, pdf_true, linewidth=2.0, label="true pdf N(1,1)")
-    plt.title("PDF / Histogram")
-    plt.xlabel("x")
-    plt.ylabel("density")
-    plt.legend(loc="best")
+    step = 0
+    for epoch in range(1, args.epochs+1):
+        for (real, _) in loader:
+            real = real.to(device)  # (B,1,28,28) in [-1,1]
+            z = torch.randn(real.size(0), args.z_dim, device=device)
+            fake = G(z)  # (B,1,28,28)
 
-    # --- Empirical CDF overlay (pure Python lists)
+            # Sliced rank f-divergence (minimize D_f(model || data))
+            D = sliced_rank_fdiv(fake, real, L=args.L, K=args.K, f_name=args.f, tau_scale=args.tau_scale)
 
-    def ecdf_list(a):
-        a_sorted = sorted(a)
-        n = len(a_sorted)
-        y = [(i+1)/n for i in range(n)]
-        return a_sorted, y
+            opt.zero_grad(set_to_none=True)
+            D.backward()
+            opt.step()
 
-    xr, yr = ecdf_list(x_real_eval)
-    xg, yg = ecdf_list(x_fake_eval)
+            if step % 200 == 0:
+                with torch.no_grad():
+                    grid = vutils.make_grid(G(fixed_z), nrow=8, normalize=True, value_range=(-1,1))
+                    vutils.save_image(grid, os.path.join(args.out_dir, f"samples_e{epoch:03d}_s{step:06d}.png"))
+                print(f"epoch {epoch:03d} | step {step:06d} | D_{args.f} {D.item():.4f}")
+            step += 1
 
-    plt.subplot(1, 2, 2)
-    plt.plot(xr, yr, label="target ECDF")
-    plt.plot(xg, yg, label="generator ECDF")
-    plt.title("Empirical CDF")
-    plt.xlabel("x")
-    plt.ylabel("probability")
-    plt.legend(loc="best")
+    # final samples
+    with torch.no_grad():
+        grid = vutils.make_grid(G(fixed_z), nrow=8, normalize=True, value_range=(-1,1))
+        vutils.save_image(grid, os.path.join(args.out_dir, f"samples_final.png"))
 
-    plt.tight_layout()
-    plt.savefig("rsfdiv_final_result.png", dpi=150)
-    plt.show()
-    print("Saved plot to rsfdiv_final_result.png")
+if __name__ == "__main__":
+    main()

@@ -9,11 +9,6 @@
 #         D^{(K)}_f(mu||nu) = (1/(K+1)) * sum_{n=0}^K f( (K+1) Q(n) ).
 #   3) The sliced multivariate version by averaging D^{(K)}_f over random
 #      directions on the unit sphere (pushforward by x -> s^T x).
-#
-# It aligns with:
-# - Your Definition of the rank-statistic f-divergence,
-# - Eq. (Q^K_expression) via Bernstein polynomials <-> Binomial pmf equivalence,
-# - The sliced extension integrating over S^{d-1}.
 # -----------------------------------------------------------------------------
 
 
@@ -162,14 +157,10 @@ def f_neyman_chi2(t: np.ndarray) -> np.ndarray:
 
 
 def f_js(t: np.ndarray) -> np.ndarray:
-    """
-    Canonical f for Jensen–Shannon divergence (natural log):
-    f(t) = t*log(2t/(1+t)) + log(2/(1+t)), t>=0, with f(0)=log 2
-    """
     t = np.asarray(t, dtype=np.float64)
     eps = 1e-300
     u = np.clip(t, eps, None)
-    return u * (np.log(2.0 * u) - np.log1p(u)) + (np.log(2.0) - np.log1p(u))
+    return 0.5 * (u * (np.log(2.0 * u) - np.log1p(u)) + (np.log(2.0) - np.log1p(u)))
 
 
 F_LIBRARY: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
@@ -500,14 +491,53 @@ def rs_f_divergence_sliced(
 # Quick examples / smoke tests
 # ---------------------------
 if __name__ == "__main__":
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(123)
 
     # 1) 1D: N(0,1) vs N(1,1)
-    mu = rng.normal(loc=0.0, scale=1.0, size=1000)
-    nu = rng.normal(loc=1.0, scale=1.0, size=1000)
-    res = rs_f_divergence_1d(mu, nu, K=100, f="kl")
-    print(f"1D KL (K=20): {res.D:.6f}")
+    K = 100
+    mu = rng.normal(loc=0.0, scale=1.0, size=10000)
+    nu = rng.normal(loc=1.0, scale=1.0, size=10000)
+    res = rs_f_divergence_1d(mu, nu, K=K, f="kl")
+    print(f"1D KL (K={K}): {res.D:.6f}")
     print(f"True KL: {0.5*((0.0-1.0)**2)/1.0:.6f}")
+    
+    #1D: Hellinger^2 for N(mu0, s0^2) vs N(mu1, s1^2) (unequal variances)
+    mu0, s0 = 0.0, 1.0
+    mu1, s1 = 0.5, 1.3
+    mu = rng.normal(loc=mu0, scale=s0, size=10000)
+    nu = rng.normal(loc=mu1, scale=s1, size=10000)
+
+    res = rs_f_divergence_1d(mu, nu, K=K, f="hellinger2")
+
+    den = s0**2 + s1**2
+    H2_true_full = 2.0 * (1.0 - np.sqrt(2.0*s0*s1/den) * np.exp(-(mu0-mu1)**2/(4.0*den)))
+    print(f"1D Hellinger^2 (K={K}): {res.D:.6f}")
+    print("True Hellinger^2 (full):", H2_true_full)
+    print(f"Ratio D^(K)/true:      {res.D / H2_true_full:.3f}")
+    
+    # 1D: Jensen–Shannon for Gaussians
+
+    mu0, s0 = 0.0, 1.0
+    mu1, s1 = 0.6, 1.2
+    mu = rng.normal(loc=mu0, scale=s0, size=10000)
+    nu = rng.normal(loc=mu1, scale=s1, size=10000)
+
+    res = rs_f_divergence_1d(mu, nu, K=K, f="js")
+    JS_true = js_normal_1d(mu0, s0, mu1, s1)
+
+    print(f"1D JS (K={K}): {res.D:.6f}")
+    print(f"True JS:       {JS_true:.6f}")
+    print(f"Ratio:         {res.D / JS_true:.3f}")
+    
+    # Extreme 1D JS example: approach log(2)
+    mu = rng.normal(0.0, 1.0, 10000)
+    nu = rng.normal(10.0, 1.0, 10000)
+
+    res = rs_f_divergence_1d(mu, nu, K=K, f="js")
+    JS_true = js_normal_1d(0.0, 1.0, 10.0, 1.0)
+
+    print(f"1D JS (K={K}):   {res.D:.6f}")
+    print(f"True JS:          {JS_true:.6f}  (log 2 ≈ {np.log(2):.6f})")
 
     # 2) Sliced 2D: mean shift along x-axis
     X = rng.normal(size=(4000, 2))

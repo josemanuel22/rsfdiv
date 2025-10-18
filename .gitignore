@@ -1,0 +1,111 @@
+# --------------------------------------------------------------------
+# Python build & bytecode
+# --------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dll
+
+# compiled extensions
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec
+
+# --------------------------------------------------------------------
+# Virtual environments
+# --------------------------------------------------------------------
+.env
+.venv
+env/
+venv/
+ENV/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# --------------------------------------------------------------------
+# IDE / editor files
+# --------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# --------------------------------------------------------------------
+# Logs, outputs & cache
+# --------------------------------------------------------------------
+*.log
+*.out
+*.err
+nohup.out
+logs/
+wandb/
+lightning_logs/
+runs/
+checkpoints/
+snapshots/
+snapshots_soft/
+snapshots_hard/
+__results__/
+
+# --------------------------------------------------------------------
+# Data, weights & generated assets
+# --------------------------------------------------------------------
+data/
+datasets/
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.npz
+*.npy
+*.gz
+*.tar
+*.zip
+
+# --------------------------------------------------------------------
+# Figures & analysis artifacts
+# --------------------------------------------------------------------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.svg
+figures/
+outputs/
+results/
+plots/
+*.mp4
+
+# --------------------------------------------------------------------
+# Notebooks and temporary files
+# --------------------------------------------------------------------
+*.ipynb
+.ipynb_checkpoints/
+tmp/
+tmp_*/
+scratch/
+*.bak
+
+# --------------------------------------------------------------------
+# System or project-specific
+# --------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Jupyter / cache
+.ipython/
+__pycache__/
+
+# Torch distributed temp
+torch_*
+slurm-*
+core.*
+

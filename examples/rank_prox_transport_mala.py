@@ -141,6 +141,77 @@ def prox_rank_step_ula(
             U.requires_grad_(True)
         return U.detach()
 
+# def prox_rank_step_mala(
+#     U0: torch.Tensor, K: int, *,
+#     eta: float = 0.5, steps: int = 1,
+#     f_name: str = "js", alpha: float = 1.6, alpha_hist: float = 1e-4,
+#     lr: Optional[float] = None, clip_v: float = 8.0, debug: bool = False,
+#     return_accept: bool = False,
+# ):
+#     """
+#     Metropolis-Adjusted Langevin (logit space):
+#       target π(U) ∝ exp(-Φ(U)), Φ(U)=D_f(p_Bern(U)||unif) + (1/(2η))||U-U0||^2
+#       Φ̃(V)=Φ(σ(V)) - Σ log σ'(V), proposal:
+#       V' ~ N(V - lr ∇Φ̃(V), 2 lr I)
+#     """
+#     f_fn = _get_f_any(f_name, alpha)
+#     lr = float(lr if lr is not None else eta)
+#     assert lr > 0.0
+#     eps = 1e-6
+#     dev, dt = U0.device, U0.dtype
+#     U0c = U0.detach().clamp(eps, 1 - eps)
+
+#     def phi_U(U: torch.Tensor) -> torch.Tensor:
+#         p = _bernstein_histogram(U, K=K, alpha=alpha_hist)
+#         D = discrete_f_div_from_pmf(p, f_fn)
+#         quad = 0.5 * (1.0 / max(1e-8, eta)) * ((U - U0) ** 2).mean()
+#         return D + quad
+
+#     with torch.enable_grad():
+#         def phi_tilde_and_grad(V: torch.Tensor):
+#             U = torch.sigmoid(V)
+#             Phi = phi_U(U)
+#             jac = -torch.log(U * (1.0 - U) + 1e-32).sum()  # -Σ log σ'(V)
+#             Phi_tilde = Phi + jac
+#             (gV,) = torch.autograd.grad(Phi_tilde, V, create_graph=False)
+#             return Phi_tilde, gV, U
+
+#         V = torch.logit(U0c).detach().to(dtype=dt).requires_grad_(True)
+#         PhiV, gV, _ = phi_tilde_and_grad(V)
+#         acc_sum = 0.0
+
+#         for _ in range(max(1, steps)):
+#             with torch.no_grad():
+#                 mean = V - lr * gV
+#                 V_prop = mean + math.sqrt(2.0 * lr) * torch.randn_like(V)
+#                 V_prop.clamp_(-clip_v, clip_v)
+
+#             V_prop = V_prop.detach().requires_grad_(True)
+#             PhiV_prop, gV_prop, _ = phi_tilde_and_grad(V_prop)
+
+#             with torch.no_grad():
+#                 def log_q(y, x, grad_x):
+#                     m = x - lr * grad_x
+#                     diff = y - m
+#                     return -(diff.pow(2).sum()) / (4.0 * lr)
+#                 log_acc = (-PhiV_prop + PhiV) + (log_q(V, V_prop, gV_prop) - log_q(V_prop, V, gV))
+#                 accept = (torch.log(torch.rand((), device=dev, dtype=dt)) < log_acc)
+#                 acc_sum += float(accept)
+#                 if debug:
+#                     print(f"[MALA] Φ̃_cur={float(PhiV):.4f} Φ̃_prop={float(PhiV_prop):.4f} "
+#                           f"Δ={float(PhiV_prop - PhiV):+.4f}  accept={float(accept)}")
+#                 if accept:
+#                     V = V_prop.detach().requires_grad_(True)
+#                     PhiV, gV, _ = phi_tilde_and_grad(V)
+#                 else:
+#                     V = V.detach().requires_grad_(True)
+
+#         U_final = torch.sigmoid(V).clamp(eps, 1 - eps).detach()
+
+#     if return_accept:
+#         return U_final, acc_sum / float(max(1, steps))
+#     return U_final
+
 def prox_rank_step_mala(
     U0: torch.Tensor, K: int, *,
     eta: float = 0.5, steps: int = 1,
@@ -149,68 +220,105 @@ def prox_rank_step_mala(
     return_accept: bool = False,
 ):
     """
-    Metropolis-Adjusted Langevin (logit space):
-      target π(U) ∝ exp(-Φ(U)), Φ(U)=D_f(p_Bern(U)||unif) + (1/(2η))||U-U0||^2
-      Φ̃(V)=Φ(σ(V)) - Σ log σ'(V), proposal:
-      V' ~ N(V - lr ∇Φ̃(V), 2 lr I)
+    Metropolis-Adjusted Langevin in logit space.
+
+    Target in U-space:
+        π(U) ∝ exp(-Φ(U)),
+        Φ(U) = D_f(p_Bern(U) || unif) + (1/(2η)) ||U - U0||^2.
+
+    We work in V = logit(U) and define Φ̃(V) = Φ(σ(V)) - Σ log σ'(V).
+    This version is self-contained wrt grad mode: it uses `torch.enable_grad()`
+    *inside* to compute gradients, so it works even if the caller is under
+    `@torch.no_grad()`.
     """
     f_fn = _get_f_any(f_name, alpha)
     lr = float(lr if lr is not None else eta)
     assert lr > 0.0
     eps = 1e-6
     dev, dt = U0.device, U0.dtype
-    U0c = U0.detach().clamp(eps, 1 - eps)
 
-    def phi_U(U: torch.Tensor) -> torch.Tensor:
-        p = _bernstein_histogram(U, K=K, alpha=alpha_hist)
-        D = discrete_f_div_from_pmf(p, f_fn)
-        quad = 0.5 * (1.0 / max(1e-8, eta)) * ((U - U0) ** 2).mean()
-        return D + quad
+    # Clamp input ranks a bit away from 0/1
+    U0c = U0.clamp(eps, 1.0 - eps)
 
-    with torch.enable_grad():
-        def phi_tilde_and_grad(V: torch.Tensor):
+    def phi_tilde_and_grad(V_in: torch.Tensor):
+        """
+        Compute Φ̃(V) and ∇_V Φ̃(V) for a *given* V_in.
+
+        We:
+          - detach V_in,
+          - reattach grad inside `torch.enable_grad()`,
+          - build Φ̃(V),
+          - call autograd.grad,
+          - detach outputs so we don't accumulate graph across calls.
+        """
+        with torch.enable_grad():
+            # Fresh leaf with grad tracking
+            V = V_in.detach().to(dtype=dt).requires_grad_(True)
             U = torch.sigmoid(V)
-            Phi = phi_U(U)
-            jac = -torch.log(U * (1.0 - U) + 1e-32).sum()  # -Σ log σ'(V)
+
+            # Φ(U) = D_f(p_Bern(U) || unif) + prox quad
+            p = _bernstein_histogram(U, K=K, alpha=alpha_hist)
+            D = discrete_f_div_from_pmf(p, f_fn)
+            quad = 0.5 * (1.0 / max(1e-8, eta)) * ((U - U0c) ** 2).mean()
+            Phi = D + quad
+
+            # log-Jacobian term: -Σ log σ'(V)
+            jac = -torch.log(U * (1.0 - U) + 1e-32).sum()
             Phi_tilde = Phi + jac
+
             (gV,) = torch.autograd.grad(Phi_tilde, V, create_graph=False)
-            return Phi_tilde, gV, U
 
-        V = torch.logit(U0c).detach().to(dtype=dt).requires_grad_(True)
-        PhiV, gV, _ = phi_tilde_and_grad(V)
-        acc_sum = 0.0
+        # Detach everything we return; we only need numeric values
+        return Phi_tilde.detach(), gV.detach(), torch.sigmoid(V.detach())
 
-        for _ in range(max(1, steps)):
-            with torch.no_grad():
-                mean = V - lr * gV
-                V_prop = mean + math.sqrt(2.0 * lr) * torch.randn_like(V)
-                V_prop.clamp_(-clip_v, clip_v)
+    # Initial logit state
+    V = torch.logit(U0c).to(dtype=dt)
+    PhiV, gV, _ = phi_tilde_and_grad(V)
+    acc_sum = 0.0
 
-            V_prop = V_prop.detach().requires_grad_(True)
-            PhiV_prop, gV_prop, _ = phi_tilde_and_grad(V_prop)
+    for _ in range(max(1, steps)):
+        # Propose V'
+        with torch.no_grad():
+            mean = V - lr * gV
+            V_prop = mean + math.sqrt(2.0 * lr) * torch.randn_like(V)
+            V_prop.clamp_(-clip_v, clip_v)
 
-            with torch.no_grad():
-                def log_q(y, x, grad_x):
-                    m = x - lr * grad_x
-                    diff = y - m
-                    return -(diff.pow(2).sum()) / (4.0 * lr)
-                log_acc = (-PhiV_prop + PhiV) + (log_q(V, V_prop, gV_prop) - log_q(V_prop, V, gV))
-                accept = (torch.log(torch.rand((), device=dev, dtype=dt)) < log_acc)
-                acc_sum += float(accept)
-                if debug:
-                    print(f"[MALA] Φ̃_cur={float(PhiV):.4f} Φ̃_prop={float(PhiV_prop):.4f} "
-                          f"Δ={float(PhiV_prop - PhiV):+.4f}  accept={float(accept)}")
-                if accept:
-                    V = V_prop.detach().requires_grad_(True)
-                    PhiV, gV, _ = phi_tilde_and_grad(V)
-                else:
-                    V = V.detach().requires_grad_(True)
+        # Evaluate potential and grad at proposal
+        PhiV_prop, gV_prop, _ = phi_tilde_and_grad(V_prop)
 
-        U_final = torch.sigmoid(V).clamp(eps, 1 - eps).detach()
+        # Metropolis–Hastings accept/reject in log space
+        with torch.no_grad():
+            def log_q(y, x, grad_x):
+                # q(y|x) = N(x - lr ∇Φ̃(x), 2 lr I)
+                m = x - lr * grad_x
+                diff = y - m
+                return -(diff.pow(2).sum()) / (4.0 * lr)
+
+            log_acc = (-PhiV_prop + PhiV) + (
+                log_q(V, V_prop, gV_prop) - log_q(V_prop, V, gV)
+            )
+            u = torch.rand((), device=dev, dtype=dt)
+            accept = (torch.log(u) < log_acc)
+            acc_sum += float(accept)
+
+            if debug:
+                print(
+                    f"[MALA] Φ̃_cur={float(PhiV):.4f} Φ̃_prop={float(PhiV_prop):.4f} "
+                    f"Δ={float(PhiV_prop - PhiV):+.4f}  accept={float(accept)}"
+                )
+
+            if accept:
+                V = V_prop.detach()
+                PhiV, gV = PhiV_prop, gV_prop
+            else:
+                V = V.detach()  # keep old state
+
+    U_final = torch.sigmoid(V).clamp(eps, 1.0 - eps)
 
     if return_accept:
-        return U_final, acc_sum / float(max(1, steps))
-    return U_final
+        return U_final.detach(), acc_sum / float(max(1, steps))
+    return U_final.detach()
+
 
 # ------------------- inverse CDF via interpolation ----------------
 
@@ -241,7 +349,7 @@ def rank_proximal_transport(
     alpha_div: float = 1.6,   # for α-div only
     eta: float = 0.5,         # prox strength / MALA step
     inner_steps: int = 5,
-    eps_move: float = 0.20,
+    eps_move: float = 0.02,
     anchored: bool = True,
     antithetic: bool = True,
     per_slice_cap: float = 0.40,
@@ -348,6 +456,7 @@ def main():
     ap.add_argument("--eta", type=float, default=0.5, help="prox strength / inner step size")
     ap.add_argument("--inner-steps", type=int, default=5)
     ap.add_argument("--x-noise", type=float, default=0.0, help="outer particle Langevin std (overridden by anneal)")
+    ap.add_argument("--L", type=int, default=64, help="number of projection directions (slices)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -383,7 +492,7 @@ def main():
         rad_before = X.norm(dim=1).mean().item()
         X = rank_proximal_transport(
             X, Y,
-            L=128, K=K_t, tau=tau_t,
+            L=args.L, K=K_t, tau=tau_t,
             f_name=args.f, alpha_div=args.alpha,
             eta=args.eta, inner_steps=args.inner_steps,
             eps_move=eps_t,

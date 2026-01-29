@@ -13,9 +13,7 @@ This repository contains code to **estimate and use rank-statistic approximation
 
 You will typically find (names may differ slightly):
 - **`src/` or package module**: estimator + utilities (rank histograms, discrete *f*-divs, slicing).
-- **`scripts/`**: runnable experiments (benchmarks, training loops, sweeps).
-- **`configs/`** (optional): Hydra / YAML configs for experiments.
-- **`notebooks/`** (optional): exploratory plots and sanity checks.
+- **`examples/`**: runnable experiments (benchmarks, training loops, sweeps).
 - **`results/` or `outputs/`** (optional): logs, figures, checkpoints.
 
 ---

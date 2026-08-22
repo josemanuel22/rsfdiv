@@ -14,7 +14,13 @@ We introduce rank-statistic approximations of *f*-divergences that can be estima
 
 The method is useful for divergence estimation, two-sample comparison, and training implicit generative models with rank-based objectives.
 
-**Topics:** *f*-divergences, rank statistics, divergence estimation, density-ratio-free estimation, two-sample testing, sliced divergences, implicit generative models, statistical machine learning.
+## Relevance to GANs and f-GANs
+
+**f-GANs connect generative adversarial networks with f-divergence minimization.** This paper is not itself a GAN training algorithm; instead, it provides a way to approximate *f*-divergences directly from samples, which is useful when comparing real data with samples from a GAN or another implicit generator.
+
+This makes rank-statistic *f*-divergences relevant to **f-GAN objectives, GAN evaluation, real-vs-generated distribution comparison, density-ratio-free divergence estimation, and sample-based generative modeling**. The method can be applied in settings where the underlying densities of the real and generated distributions are unavailable.
+
+**Topics:** *f*-divergences, rank statistics, divergence estimation, density-ratio-free estimation, two-sample testing, sliced divergences, implicit generative models, generative adversarial networks (GANs), f-GAN, GAN evaluation, generated sample comparison, statistical machine learning.
 
 ---
 
@@ -25,6 +31,7 @@ This repository contains code to **estimate and use rank-statistic approximation
 > Typical uses:
 > - divergence estimation between two sample sets (1D and sliced/high-D),
 > - two-sample testing / discrepancy measurement,
+> - comparing real data with samples from GANs or other implicit generative models,
 > - training implicit generative models with RS-*f*-divergence–based losses (e.g., as pretraining or auxiliary objectives).
 
 ---

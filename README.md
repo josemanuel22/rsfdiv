@@ -6,7 +6,9 @@ Official code repository for the paper:
 Viktor Stein and José Manuel de Frutos  
 *International Conference on Machine Learning (ICML), 2026*
 
-[arXiv](https://arxiv.org/abs/2601.22784) · [PDF](https://arxiv.org/pdf/2601.22784) · [OpenReview](https://openreview.net/forum?id=6dI31vzkqT)
+[arXiv](https://arxiv.org/abs/2601.22784) · [PDF](https://arxiv.org/pdf/2601.22784) · [OpenReview](https://openreview.net/forum?id=6dI31vzkqT) · [Published paper (PMLR)](https://proceedings.mlr.press/v306/stein26b.html)
+
+**New tutorial:** [Estimating KL, Jensen–Shannon and Hellinger divergences directly from samples (without neural networks)](docs/estimating_f_divergences_from_samples.md) — with a [reproducible NumPy/SciPy example](examples/tutorial_fdivergence_estimators.py) and an illustrative variational KL comparison.
 
 ## What does this paper do?
 
